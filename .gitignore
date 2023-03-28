@@ -109,6 +109,7 @@ build
 buildWASM
 docs/html
 node_modules/
+install/
 __pycache__
 .vscode/c_cpp_properties.json
 *.sublime-project
