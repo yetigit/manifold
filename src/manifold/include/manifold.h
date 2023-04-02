@@ -169,7 +169,11 @@ class Manifold {
 
   struct Impl;
 
+  #ifdef MANIFOLD_DEBUG
+ public:
+#else
  private:
+  #endif
   Manifold(std::shared_ptr<CsgNode> pNode_);
   Manifold(std::shared_ptr<Impl> pImpl_);
   static Manifold Invalid();
