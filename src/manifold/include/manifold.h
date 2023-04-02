@@ -51,6 +51,10 @@ class Manifold {
   Manifold& operator=(Manifold&&) noexcept;
 
   Manifold(const MeshGL&, const std::vector<float>& propertyTolerance = {});
+  Manifold(const Mesh& mesh, const std::vector<glm::ivec3>& triProperties,
+           const std::vector<float>& properties,
+           const std::vector<float>& propertyTolerance);
+
   Manifold(const Mesh&);
 
   static Manifold Smooth(const MeshGL&,
@@ -110,6 +114,9 @@ class Manifold {
   int Genus() const;
   Properties GetProperties() const;
   Curvature GetCurvature() const;
+
+  void GetMeshRelation(void*) const;
+
   ///@}
 
   /** @name Mesh ID

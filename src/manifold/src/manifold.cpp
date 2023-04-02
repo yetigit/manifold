@@ -129,6 +129,22 @@ Manifold::Manifold(const Mesh& mesh) {
       std::make_shared<CsgLeafNode>(std::make_shared<Impl>(mesh, relation));
 }
 
+
+Manifold::Manifold(const Mesh& mesh,
+                   const std::vector<glm::ivec3>& triProperties,
+                   const std::vector<float>& properties,
+                   const std::vector<float>& propertyTolerance) {
+
+
+  Impl::MeshRelationD relation;
+  relation.originalID = (int)ReserveIDs(1);
+  relation.triProperties = triProperties;
+  relation.properties = properties;
+  pNode_ = std::make_shared<CsgLeafNode>(std::make_shared<Impl>(
+      mesh, relation, propertyTolerance));
+
+}
+
 /**
  * This returns a Mesh of simple vectors of vertices and triangles suitable for
  * saving or other operations outside of the context of this library.
@@ -398,6 +414,14 @@ Properties Manifold::GetProperties() const {
  */
 Curvature Manifold::GetCurvature() const {
   return GetCsgLeafNode().GetImpl()->GetCurvature();
+}
+void Manifold::GetMeshRelation(void* outRelation) const {
+  auto& out = *static_cast<Impl::MeshRelationD*>(outRelation);
+  const auto& relation = GetCsgLeafNode().GetImpl()->meshRelation_;
+  out.triRef.reserve(relation.triRef.size());
+  for (auto & cur : relation.triRef) {
+    out.triRef.push_back(cur);
+  }
 }
 
 /**
