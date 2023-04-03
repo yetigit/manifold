@@ -364,6 +364,7 @@ class Monotones {
     VertItr vWest, vEast, vMerge;
     PairItr nextPair;
     bool westCertain, eastCertain, startCertain;
+    bool isRemoved = false;
 
     int WestOf(VertItr vert, float precision) const {
       int westOf = CCW(vEast->right->pos, vEast->pos, vert->pos, precision);
@@ -566,6 +567,7 @@ class Monotones {
    */
   void RemovePair(PairItr pair) {
     pair->nextPair = std::next(pair);
+    pair->isRemoved = true;
     inactivePairs_.splice(inactivePairs_.end(), activePairs_, pair);
   }
 
@@ -947,7 +949,7 @@ class Monotones {
       OVERLAP_ASSERT(type != Skip, "Skip should not happen on reverse sweep!");
 
       PairItr westPair = GetPair(vert, type);
-      OVERLAP_ASSERT(westPair != activePairs_.end(), "No active pair!");
+      OVERLAP_ASSERT(westPair->isRemoved || westPair != activePairs_.end(), "No active pair!");
 
       switch (type) {
         case Merge: {
@@ -972,6 +974,7 @@ class Monotones {
           // begin and end are swapped.
           PairItr eastPair = westPair;
           westPair = eastPair->nextPair;
+          eastPair->isRemoved = false;
           activePairs_.splice(westPair == activePairs_.end()
                                   ? activePairs_.begin()
                                   : std::next(westPair),
