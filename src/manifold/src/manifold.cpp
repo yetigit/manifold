@@ -91,6 +91,13 @@ CsgLeafNode& Manifold::GetCsgLeafNode() const {
   return *std::static_pointer_cast<CsgLeafNode>(pNode_);
 }
 
+CsgLeafNode& Manifold::GetCsgLeafNodeMut() {
+  if (pNode_->GetNodeType() != CsgNodeType::Leaf) {
+    pNode_ = pNode_->ToLeafNode();
+  }
+  return *std::static_pointer_cast<CsgLeafNode>(pNode_);
+}
+
 /**
  * Convert a MeshGL into a Manifold, retaining its properties and merging only
  * the positions according to the merge vectors. Will return an empty Manifold
@@ -456,6 +463,10 @@ Manifold Manifold::AsOriginal() const {
  */
 uint32_t Manifold::ReserveIDs(uint32_t n) {
   return Manifold::Impl::ReserveIDs(n);
+}
+
+void Manifold::SetID(int ith) {
+  GetCsgLeafNodeMut().GetImplMut().meshRelation_.originalID = ith;
 }
 
 /**

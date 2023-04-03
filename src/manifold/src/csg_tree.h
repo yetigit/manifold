@@ -46,6 +46,7 @@ class CsgLeafNode final : public CsgNode {
               glm::mat4x3 transform_);
 
   std::shared_ptr<const Manifold::Impl> GetImpl() const;
+  Manifold::Impl& GetImplMut(); // unsafe
 
   std::shared_ptr<CsgLeafNode> ToLeafNode() const override;
 

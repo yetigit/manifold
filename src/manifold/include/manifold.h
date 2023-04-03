@@ -127,6 +127,7 @@ class Manifold {
   int OriginalID() const;
   Manifold AsOriginal() const;
   static uint32_t ReserveIDs(uint32_t);
+  void SetID(int);
   ///@}
 
   /** @name Modification
@@ -188,6 +189,7 @@ class Manifold {
   mutable std::shared_ptr<CsgNode> pNode_;
 
   CsgLeafNode& GetCsgLeafNode() const;
+  CsgLeafNode& GetCsgLeafNodeMut(); // unsafe
 };
 /** @} */
 }  // namespace manifold

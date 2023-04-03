@@ -130,6 +130,17 @@ std::shared_ptr<const Manifold::Impl> CsgLeafNode::GetImpl() const {
   return pImpl_;
 }
 
+Manifold::Impl & CsgLeafNode::GetImplMut() {
+  if (transform_ == glm::mat4x3(1.0f)) 
+	  return * (Manifold::Impl*)((size_t)(pImpl_.get()));
+
+  pImpl_ =
+      std::make_shared< Manifold::Impl>(pImpl_->Transform(transform_));
+  transform_ = glm::mat4x3(1.0f);
+
+  return * (Manifold::Impl*)((size_t)(pImpl_.get()));
+}
+
 glm::mat4x3 CsgLeafNode::GetTransform() const { return transform_; }
 
 std::shared_ptr<CsgLeafNode> CsgLeafNode::ToLeafNode() const {
