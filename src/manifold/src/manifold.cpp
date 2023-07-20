@@ -139,7 +139,7 @@ Manifold::Manifold(const Mesh& mesh) {
 
 Manifold::Manifold(const Mesh& mesh,
                    const std::vector<glm::ivec3>& triProperties,
-                   const std::vector<float>& properties,
+                   const std::vector<float>& properties, const int numProp,
                    const std::vector<float>& propertyTolerance) {
 
 
@@ -147,6 +147,7 @@ Manifold::Manifold(const Mesh& mesh,
   relation.originalID = (int)ReserveIDs(1);
   relation.triProperties = triProperties;
   relation.properties = properties;
+  relation.numProp = numProp;
   pNode_ = std::make_shared<CsgLeafNode>(std::make_shared<Impl>(
       mesh, relation, propertyTolerance));
 
@@ -421,14 +422,6 @@ Properties Manifold::GetProperties() const {
  */
 Curvature Manifold::GetCurvature() const {
   return GetCsgLeafNode().GetImpl()->GetCurvature();
-}
-void Manifold::GetMeshRelation(void* outRelation) const {
-  auto& out = *static_cast<Impl::MeshRelationD*>(outRelation);
-  const auto& relation = GetCsgLeafNode().GetImpl()->meshRelation_;
-  out.triRef.reserve(relation.triRef.size());
-  for (auto & cur : relation.triRef) {
-    out.triRef.push_back(cur);
-  }
 }
 
 /**

@@ -52,7 +52,7 @@ class Manifold {
 
   Manifold(const MeshGL&, const std::vector<float>& propertyTolerance = {});
   Manifold(const Mesh& mesh, const std::vector<glm::ivec3>& triProperties,
-           const std::vector<float>& properties,
+           const std::vector<float>& properties, int const numProp,
            const std::vector<float>& propertyTolerance);
 
   Manifold(const Mesh&);
@@ -115,7 +115,6 @@ class Manifold {
   Properties GetProperties() const;
   Curvature GetCurvature() const;
 
-  void GetMeshRelation(void*) const;
 
   ///@}
 
@@ -177,11 +176,7 @@ class Manifold {
 
   struct Impl;
 
-  #ifdef MANIFOLD_DEBUG
  public:
-#else
- private:
-  #endif
   Manifold(std::shared_ptr<CsgNode> pNode_);
   Manifold(std::shared_ptr<Impl> pImpl_);
   static Manifold Invalid();
