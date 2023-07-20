@@ -106,11 +106,28 @@ ManifoldCrossSection *manifold_cross_section_intersection(
   return to_c(new (mem) CrossSection(cs));
 }
 
-ManifoldCrossSection *manifold_cross_section_rect_clip(void *mem,
-                                                       ManifoldCrossSection *cs,
-                                                       ManifoldRect *r) {
-  auto clipped = from_c(cs)->RectClip(*from_c(r));
-  return to_c(new (mem) CrossSection(clipped));
+ManifoldCrossSection *manifold_cross_section_hull(void *mem,
+                                                  ManifoldCrossSection *cs) {
+  auto hulled = from_c(cs)->Hull();
+  return to_c(new (mem) CrossSection(hulled));
+}
+
+ManifoldCrossSection *manifold_cross_section_batch_hull(
+    void *mem, ManifoldCrossSectionVec *css) {
+  auto hulled = CrossSection::Hull(*from_c(css));
+  return to_c(new (mem) CrossSection(hulled));
+}
+
+ManifoldCrossSection *manifold_cross_section_hull_simple_polygon(
+    void *mem, ManifoldSimplePolygon *ps) {
+  auto hulled = CrossSection::Hull(*from_c(ps));
+  return to_c(new (mem) CrossSection(hulled));
+}
+
+ManifoldCrossSection *manifold_cross_section_hull_polygons(
+    void *mem, ManifoldPolygons *ps) {
+  auto hulled = CrossSection::Hull(*from_c(ps));
+  return to_c(new (mem) CrossSection(hulled));
 }
 
 ManifoldCrossSection *manifold_cross_section_translate(void *mem,
@@ -169,9 +186,9 @@ ManifoldCrossSection *manifold_cross_section_simplify(void *mem,
 
 ManifoldCrossSection *manifold_cross_section_offset(
     void *mem, ManifoldCrossSection *cs, double delta, ManifoldJoinType jt,
-    double miter_limit, double arc_tolerance) {
+    double miter_limit, int circular_segments) {
   auto offset =
-      from_c(cs)->Offset(delta, from_c(jt), miter_limit, arc_tolerance);
+      from_c(cs)->Offset(delta, from_c(jt), miter_limit, circular_segments);
   return to_c(new (mem) CrossSection(offset));
 }
 

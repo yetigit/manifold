@@ -49,7 +49,7 @@ struct ShortEdge {
   const glm::vec3* vertPos;
   const float precision;
 
-  __host__ __device__ bool operator()(int edge) {
+  __host__ __device__ bool operator()(int edge) const {
     if (halfedge[edge].pairedHalfedge < 0) return false;
     // Flag short edges
     const glm::vec3 delta =
@@ -62,7 +62,7 @@ struct FlagEdge {
   const Halfedge* halfedge;
   const TriRef* triRef;
 
-  __host__ __device__ bool operator()(int edge) {
+  __host__ __device__ bool operator()(int edge) const {
     if (halfedge[edge].pairedHalfedge < 0) return false;
     // Flag redundant edges - those where the startVert is surrounded by only
     // two original triangles.
@@ -87,7 +87,7 @@ struct SwappableEdge {
   const glm::vec3* triNormal;
   const float precision;
 
-  __host__ __device__ bool operator()(int edge) {
+  __host__ __device__ bool operator()(int edge) const {
     if (halfedge[edge].pairedHalfedge < 0) return false;
 
     int tri = halfedge[edge].face;
@@ -108,6 +108,15 @@ struct SwappableEdge {
       v[i] = projection * vertPos[halfedge[triedge[i]].startVert];
     return CCW(v[0], v[1], v[2], precision) > 0 ||
            Is01Longest(v[0], v[1], v[2]);
+  }
+};
+
+struct SortEntry {
+  int start;
+  int end;
+  int index;
+  inline bool operator<(const SortEntry& other) const {
+    return start == other.start ? end < other.end : start < other.start;
   }
 };
 }  // namespace
@@ -136,56 +145,96 @@ namespace manifold {
 void Manifold::Impl::SimplifyTopology() {
   if (!halfedge_.size()) return;
 
+  int nbEdges = halfedge_.size();
+  int numFlagged = 0;
+  VecDH<uint8_t> bflags(nbEdges);
+  uint8_t* bflagsPtr = bflags.ptrD();
+
+  VecDH<SortEntry> entries(nbEdges);
+  SortEntry* entriesPtr = entries.ptrD();
+
   auto policy = autoPolicy(halfedge_.size());
+  for_each_n(policy, countAt(0), nbEdges, [=] __host__ __device__(int i) {
+    entriesPtr[i].start = halfedge_[i].startVert;
+    entriesPtr[i].end = halfedge_[i].endVert;
+    entriesPtr[i].index = i;
+  });
 
-  VecDH<Halfedge> halfedge(halfedge_);
-  VecDH<int> idx(halfedge_.size());
-  sequence(policy, idx.begin(), idx.end());
-  sort_by_key(policy, halfedge.begin(), halfedge.end(), idx.begin());
-
-  VecDH<int> flaggedEdges(halfedge_.size());
-
-  int numFlagged =
-      copy_if<decltype(flaggedEdges.begin())>(
-          policy, idx.begin(), idx.end() - 1, countAt(0), flaggedEdges.begin(),
-          DuplicateEdge({halfedge.cptrD()})) -
-      flaggedEdges.begin();
-  flaggedEdges.resize(numFlagged);
-
-  for (const int edge : flaggedEdges) DedupeEdge(edge);
-
-  flaggedEdges.resize(halfedge_.size());
-  numFlagged =
-      copy_if<decltype(flaggedEdges.begin())>(
-          policy, countAt(0), countAt(halfedge_.size()), flaggedEdges.begin(),
-          ShortEdge({halfedge_.cptrD(), vertPos_.cptrD(), precision_})) -
-      flaggedEdges.begin();
-  flaggedEdges.resize(numFlagged);
-
-  for (const int edge : flaggedEdges) CollapseEdge(edge);
-
-  flaggedEdges.resize(halfedge_.size());
-  numFlagged =
-      copy_if<decltype(flaggedEdges.begin())>(
-          policy, countAt(0), countAt(halfedge_.size()), flaggedEdges.begin(),
-          FlagEdge({halfedge_.cptrD(), meshRelation_.triRef.cptrD()})) -
-      flaggedEdges.begin();
-  flaggedEdges.resize(numFlagged);
-
-  for (const int edge : flaggedEdges) CollapseEdge(edge);
-
-  flaggedEdges.resize(halfedge_.size());
-  numFlagged =
-      copy_if<decltype(flaggedEdges.begin())>(
-          policy, countAt(0), countAt(halfedge_.size()), flaggedEdges.begin(),
-          SwappableEdge({halfedge_.cptrD(), vertPos_.cptrD(),
-                         faceNormal_.cptrD(), precision_})) -
-      flaggedEdges.begin();
-  flaggedEdges.resize(numFlagged);
-
-  for (const int edge : flaggedEdges) {
-    RecursiveEdgeSwap(edge);
+  sort(policy, entries.begin(), entries.end());
+  for (int i = 0; i < nbEdges - 1; ++i) {
+    if (entries[i].start == entries[i + 1].start &&
+        entries[i].end == entries[i + 1].end) {
+      DedupeEdge(entries[i].index);
+      numFlagged++;
+    }
   }
+
+#ifdef MANIFOLD_DEBUG
+  if (ManifoldParams().verbose && numFlagged > 0) {
+    std::cout << "found " << numFlagged << " duplicate edges to split"
+              << std::endl;
+  }
+#endif
+
+  {
+    numFlagged = 0;
+    ShortEdge se{halfedge_.cptrD(), vertPos_.cptrD(), precision_};
+    for_each_n(policy, countAt(0), nbEdges,
+               [=] __host__ __device__(int i) { bflagsPtr[i] = se(i); });
+    for (int i = 0; i < nbEdges; ++i) {
+      if (bflags[i]) {
+        CollapseEdge(i);
+        numFlagged++;
+      }
+    }
+  }
+
+#ifdef MANIFOLD_DEBUG
+  if (ManifoldParams().verbose && numFlagged > 0) {
+    std::cout << "found " << numFlagged << " short edges to collapse"
+              << std::endl;
+  }
+#endif
+
+  {
+    numFlagged = 0;
+    FlagEdge se{halfedge_.cptrD(), meshRelation_.triRef.cptrD()};
+    for_each_n(policy, countAt(0), nbEdges,
+               [=] __host__ __device__(int i) { bflagsPtr[i] = se(i); });
+    for (int i = 0; i < nbEdges; ++i) {
+      if (bflags[i]) {
+        CollapseEdge(i);
+        numFlagged++;
+      }
+    }
+  }
+
+#ifdef MANIFOLD_DEBUG
+  if (ManifoldParams().verbose && numFlagged > 0) {
+    std::cout << "found " << numFlagged << " colinear edges to collapse"
+              << std::endl;
+  }
+#endif
+
+  {
+    numFlagged = 0;
+    SwappableEdge se{halfedge_.cptrD(), vertPos_.cptrD(), faceNormal_.cptrD(),
+                     precision_};
+    for_each_n(policy, countAt(0), nbEdges,
+               [=] __host__ __device__(int i) { bflagsPtr[i] = se(i); });
+    for (int i = 0; i < nbEdges; ++i) {
+      if (bflags[i]) {
+        RecursiveEdgeSwap(i);
+        numFlagged++;
+      }
+    }
+  }
+
+#ifdef MANIFOLD_DEBUG
+  if (ManifoldParams().verbose && numFlagged > 0) {
+    std::cout << "found " << numFlagged << " edges to swap" << std::endl;
+  }
+#endif
 }
 
 void Manifold::Impl::DedupeEdge(const int edge) {
@@ -253,11 +302,13 @@ void Manifold::Impl::PairUp(int edge0, int edge1) {
 // (edgeEdge.endVert must == startEdge.endVert), updating each edge to point
 // to vert instead.
 void Manifold::Impl::UpdateVert(int vert, int startEdge, int endEdge) {
-  while (startEdge != endEdge) {
-    halfedge_[startEdge].endVert = vert;
-    startEdge = NextHalfedge(startEdge);
-    halfedge_[startEdge].startVert = vert;
-    startEdge = halfedge_[startEdge].pairedHalfedge;
+  int current = startEdge;
+  while (current != endEdge) {
+    halfedge_[current].endVert = vert;
+    current = NextHalfedge(current);
+    halfedge_[current].startVert = vert;
+    current = halfedge_[current].pairedHalfedge;
+    ASSERT(current != startEdge, logicErr, "infinite loop in decimator!");
   }
 }
 
@@ -298,8 +349,23 @@ void Manifold::Impl::RemoveIfFolded(int edge) {
   const glm::ivec3 tri0edge = TriOf(edge);
   const glm::ivec3 tri1edge = TriOf(halfedge_[edge].pairedHalfedge);
   if (halfedge_[tri0edge[1]].endVert == halfedge_[tri1edge[1]].endVert) {
+    if (halfedge_[tri0edge[1]].pairedHalfedge == tri1edge[2]) {
+      if (halfedge_[tri0edge[2]].pairedHalfedge == tri1edge[1]) {
+        for (int i : {0, 1, 2})
+          vertPos_[halfedge_[tri0edge[i]].startVert] = glm::vec3(NAN);
+      } else {
+        vertPos_[halfedge_[tri0edge[1]].startVert] = glm::vec3(NAN);
+      }
+    } else {
+      if (halfedge_[tri0edge[2]].pairedHalfedge == tri1edge[1]) {
+        vertPos_[halfedge_[tri1edge[1]].startVert] = glm::vec3(NAN);
+      }
+    }
+    PairUp(halfedge_[tri0edge[1]].pairedHalfedge,
+           halfedge_[tri1edge[2]].pairedHalfedge);
+    PairUp(halfedge_[tri0edge[2]].pairedHalfedge,
+           halfedge_[tri1edge[1]].pairedHalfedge);
     for (int i : {0, 1, 2}) {
-      vertPos_[halfedge_[tri0edge[i]].startVert] = glm::vec3(NAN);
       halfedge_[tri0edge[i]] = {-1, -1, -1, -1};
       halfedge_[tri1edge[i]] = {-1, -1, -1, -1};
     }
@@ -518,5 +584,28 @@ void Manifold::Impl::RecursiveEdgeSwap(const int edge) {
   SwapEdge();
   RecursiveEdgeSwap(halfedge_[tri0edge[1]].pairedHalfedge);
   RecursiveEdgeSwap(halfedge_[tri1edge[0]].pairedHalfedge);
+}
+
+void Manifold::Impl::SplitPinchedVerts() {
+  std::vector<bool> vertProcessed(NumVert(), false);
+  std::vector<bool> halfedgeProcessed(halfedge_.size(), false);
+  for (int i = 0; i < halfedge_.size(); ++i) {
+    if (halfedgeProcessed[i]) continue;
+    int vert = halfedge_[i].startVert;
+    if (vertProcessed[vert]) {
+      vertPos_.push_back(vertPos_[vert]);
+      vert = NumVert() - 1;
+    } else {
+      vertProcessed[vert] = true;
+    }
+    int current = i;
+    do {
+      halfedgeProcessed[current] = true;
+      halfedge_[current].startVert = vert;
+      current = halfedge_[current].pairedHalfedge;
+      halfedge_[current].endVert = vert;
+      current = NextHalfedge(current);
+    } while (current != i);
+  }
 }
 }  // namespace manifold

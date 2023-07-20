@@ -18,6 +18,7 @@
 
 #include "boolean3.h"
 #include "impl.h"
+#include "mesh_fixes.h"
 #include "par.h"
 
 namespace {
@@ -27,16 +28,6 @@ struct Transform4x3 {
 
   __host__ __device__ glm::vec3 operator()(glm::vec3 position) {
     return transform * glm::vec4(position, 1.0f);
-  }
-};
-
-struct TransformNormals {
-  const glm::mat3 transform;
-
-  __host__ __device__ glm::vec3 operator()(glm::vec3 normal) {
-    normal = glm::normalize(transform * normal);
-    if (isnan(normal.x)) normal = glm::vec3(0.0f);
-    return normal;
   }
 };
 
@@ -51,6 +42,15 @@ struct UpdateHalfedge {
     edge.pairedHalfedge += nextEdge;
     edge.face += nextFace;
     return edge;
+  }
+};
+
+struct UpdateTriProp {
+  const int nextProp;
+
+  __host__ __device__ glm::ivec3 operator()(glm::ivec3 tri) {
+    tri += nextProp;
+    return tri;
   }
 };
 
@@ -162,9 +162,12 @@ Manifold::Impl CsgLeafNode::Compose(
   int numVert = 0;
   int numEdge = 0;
   int numTri = 0;
+  int numPropVert = 0;
   std::vector<int> vertIndices;
   std::vector<int> edgeIndices;
   std::vector<int> triIndices;
+  std::vector<int> propVertIndices;
+  int numPropOut = 0;
   for (auto &node : nodes) {
     float nodeOldScale = node->pImpl_->bBox_.Scale();
     float nodeNewScale =
@@ -178,9 +181,15 @@ Manifold::Impl CsgLeafNode::Compose(
     vertIndices.push_back(numVert);
     edgeIndices.push_back(numEdge * 2);
     triIndices.push_back(numTri);
+    propVertIndices.push_back(numPropVert);
     numVert += node->pImpl_->NumVert();
     numEdge += node->pImpl_->NumEdge();
     numTri += node->pImpl_->NumTri();
+    const int numProp = node->pImpl_->NumProp();
+    numPropOut = glm::max(numPropOut, numProp);
+    numPropVert +=
+        numProp == 0 ? 1
+                     : node->pImpl_->meshRelation_.properties.size() / numProp;
   }
 
   Manifold::Impl combined;
@@ -190,6 +199,11 @@ Manifold::Impl CsgLeafNode::Compose(
   combined.faceNormal_.resize(numTri);
   combined.halfedgeTangent_.resize(2 * numEdge);
   combined.meshRelation_.triRef.resize(numTri);
+  if (numPropOut > 0) {
+    combined.meshRelation_.numProp = numPropOut;
+    combined.meshRelation_.properties.resize(numPropOut * numPropVert, 0);
+    combined.meshRelation_.triProperties.resize(numTri);
+  }
   auto policy = autoPolicy(numTri);
 
   // if we are already parallelizing for each node, do not perform multithreaded
@@ -202,9 +216,44 @@ Manifold::Impl CsgLeafNode::Compose(
   for_each_n_host(
       nodes.size() > 1 ? ExecutionPolicy::Par : ExecutionPolicy::Seq,
       countAt(0), nodes.size(),
-      [&nodes, &vertIndices, &edgeIndices, &triIndices, &combined,
-       policy](int i) {
+      [&nodes, &vertIndices, &edgeIndices, &triIndices, &propVertIndices,
+       numPropOut, &combined, policy](int i) {
         auto &node = nodes[i];
+        copy(policy, node->pImpl_->halfedgeTangent_.begin(),
+             node->pImpl_->halfedgeTangent_.end(),
+             combined.halfedgeTangent_.begin() + edgeIndices[i]);
+        transform(
+            policy, node->pImpl_->halfedge_.begin(),
+            node->pImpl_->halfedge_.end(),
+            combined.halfedge_.begin() + edgeIndices[i],
+            UpdateHalfedge({vertIndices[i], edgeIndices[i], triIndices[i]}));
+
+        if (numPropOut > 0) {
+          auto start =
+              combined.meshRelation_.triProperties.begin() + triIndices[i];
+          if (node->pImpl_->NumProp() > 0) {
+            auto &triProp = node->pImpl_->meshRelation_.triProperties;
+            transform(policy, triProp.begin(), triProp.end(), start,
+                      UpdateTriProp({propVertIndices[i]}));
+
+            const int numProp = node->pImpl_->NumProp();
+            auto &oldProp = node->pImpl_->meshRelation_.properties;
+            auto &newProp = combined.meshRelation_.properties;
+            for (int p = 0; p < numProp; ++p) {
+              strided_range<VecDH<float>::IterC> oldRange(
+                  oldProp.begin() + p, oldProp.end(), numProp);
+              strided_range<VecDH<float>::Iter> newRange(
+                  newProp.begin() + numPropOut * propVertIndices[i] + p,
+                  newProp.end(), numPropOut);
+              copy(policy, oldRange.begin(), oldRange.end(), newRange.begin());
+            }
+          } else {
+            // point all triangles at single new property of zeros.
+            fill(policy, start, start + node->pImpl_->NumTri(),
+                 glm::ivec3(propVertIndices[i]));
+          }
+        }
+
         if (node->transform_ == glm::mat4x3(1.0f)) {
           copy(policy, node->pImpl_->vertPos_.begin(),
                node->pImpl_->vertPos_.end(),
@@ -226,15 +275,22 @@ Manifold::Impl CsgLeafNode::Compose(
                  combined.vertPos_.begin() + vertIndices[i]);
           copy_n(policy, faceNormalBegin, node->pImpl_->faceNormal_.size(),
                  combined.faceNormal_.begin() + triIndices[i]);
+
+          const bool invert = glm::determinant(glm::mat3(node->transform_)) < 0;
+          for_each_n(policy,
+                     zip(combined.halfedgeTangent_.begin() + edgeIndices[i],
+                         countAt(0)),
+                     node->pImpl_->halfedgeTangent_.size(),
+                     TransformTangents{glm::mat3(node->transform_), invert,
+                                       node->pImpl_->halfedgeTangent_.cptrD(),
+                                       node->pImpl_->halfedge_.cptrD()});
+          if (invert)
+            for_each_n(policy,
+                       zip(combined.meshRelation_.triRef.begin(),
+                           countAt(triIndices[i])),
+                       node->pImpl_->NumTri(),
+                       FlipTris({combined.halfedge_.ptrD()}));
         }
-        copy(policy, node->pImpl_->halfedgeTangent_.begin(),
-             node->pImpl_->halfedgeTangent_.end(),
-             combined.halfedgeTangent_.begin() + edgeIndices[i]);
-        transform(
-            policy, node->pImpl_->halfedge_.begin(),
-            node->pImpl_->halfedge_.end(),
-            combined.halfedge_.begin() + edgeIndices[i],
-            UpdateHalfedge({vertIndices[i], edgeIndices[i], triIndices[i]}));
         // Since the nodes may be copies containing the same meshIDs, it is
         // important to add an offset so that each node instance gets
         // unique meshIDs.

@@ -20,7 +20,11 @@ The most significant contribution here is a guaranteed-manifold [mesh Boolean](h
 
 ## Note on memory management
 
-Since Manifold is a WASM module, it does not automatically garbage-collect like regular JavaScript. You must manually `delete()` each manifold object constructed by your scripts, see https://github.com/elalish/manifold/discussions/256#discussioncomment-3944287.
+Since Manifold is a WASM module, it does not automatically garbage-collect like regular JavaScript. You must manually `delete()` each manifold object constructed by your scripts, see [discussion](https://github.com/elalish/manifold/discussions/256#discussioncomment-3944287).
+
+## Examples
+
+Please see our usage [examples](https://github.com/elalish/manifold/tree/master/bindings/wasm/examples) to see how to interface this library with `three.js`, `<model-viewer>`, and `glTF`. Of particular note are the included libraries for lossless roundtrip of manifold meshes through glTF files, via a new extension: [EXT_manifold](https://github.com/KhronosGroup/glTF/pull/2286). 
 
 ## About the author
 

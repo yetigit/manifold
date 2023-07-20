@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <QuickHull.hpp>
 #include <algorithm>
 #include <map>
 #include <numeric>
@@ -36,6 +37,26 @@ struct MakeTri {
 
     for (int i : {0, 1, 2}) {
       tri[i] = halfedges[face + i].startVert;
+    }
+  }
+};
+
+struct UpdateProperties {
+  float* properties;
+  const int numProp;
+  const float* oldProperties;
+  const int numOldProp;
+  const glm::vec3* vertPos;
+  const glm::ivec3* triProperties;
+  const Halfedge* halfedges;
+  std::function<void(float*, glm::vec3, const float*)> propFunc;
+
+  __host__ __device__ void operator()(int tri) {
+    for (int i : {0, 1, 2}) {
+      const int vert = halfedges[3 * tri + i].startVert;
+      const int propVert = triProperties[tri][i];
+      propFunc(properties + numProp * propVert, vertPos[vert],
+               oldProperties + numOldProp * propVert);
     }
   }
 };
@@ -161,6 +182,7 @@ Mesh Manifold::GetMesh() const {
   const Impl& impl = *GetCsgLeafNode().GetImpl();
 
   Mesh result;
+  result.precision = Precision();
   result.vertPos.insert(result.vertPos.end(), impl.vertPos_.begin(),
                         impl.vertPos_.end());
   result.vertNormal.insert(result.vertNormal.end(), impl.vertNormal_.begin(),
@@ -202,6 +224,7 @@ MeshGL Manifold::GetMeshGL(glm::ivec3 normalIdx) const {
       !isOriginal && glm::all(glm::greaterThan(normalIdx, glm::ivec3(2)));
 
   MeshGL out;
+  out.precision = Precision();
   out.numProp = 3 + numProp;
   out.triVerts.resize(3 * numTri);
 
@@ -286,7 +309,9 @@ MeshGL Manifold::GetMeshGL(glm::ivec3 normalIdx) const {
 
   // Duplicate verts with different props
   std::vector<int> vert2idx(impl.NumVert(), -1);
-  std::map<std::pair<int, int>, int> vertPropPair;
+  std::vector<std::vector<glm::ivec2>> vertPropPair(impl.NumVert());
+  out.vertProperties.reserve(numVert * out.numProp);
+
   for (int run = 0; run < out.runOriginalID.size(); ++run) {
     for (int tri = out.runIndex[run] / 3; tri < out.runIndex[run + 1] / 3;
          ++tri) {
@@ -296,14 +321,19 @@ MeshGL Manifold::GetMeshGL(glm::ivec3 normalIdx) const {
         const int prop = triProp[i];
         const int vert = out.triVerts[3 * tri + i];
 
-        const auto it = vertPropPair.find({vert, prop});
-        if (it != vertPropPair.end()) {
-          out.triVerts[3 * tri + i] = it->second;
-          continue;
+        auto& bin = vertPropPair[vert];
+        bool bFound = false;
+        for (int k = 0; k < bin.size(); ++k) {
+          if (bin[k].x == prop) {
+            bFound = true;
+            out.triVerts[3 * tri + i] = bin[k].y;
+            break;
+          }
         }
+        if (bFound) continue;
         const int idx = out.vertProperties.size() / out.numProp;
-        vertPropPair.insert({{vert, prop}, idx});
         out.triVerts[3 * tri + i] = idx;
+        bin.push_back({prop, idx});
 
         for (int p : {0, 1, 2}) {
           out.vertProperties.push_back(impl.vertPos_[vert][p]);
@@ -312,6 +342,7 @@ MeshGL Manifold::GetMeshGL(glm::ivec3 normalIdx) const {
           out.vertProperties.push_back(
               impl.meshRelation_.properties[prop * numProp + p]);
         }
+
         if (updateNormals) {
           glm::vec3 normal;
           const int start = out.vertProperties.size() - out.numProp;
@@ -403,25 +434,10 @@ int Manifold::Genus() const {
 }
 
 /**
- * Returns the surface area and volume of the manifold. These properties are
- * clamped to zero for a given face if they are within the Precision(). This
- * means degenerate manifolds can by identified by testing these properties as
- * == 0.
+ * Returns the surface area and volume of the manifold.
  */
 Properties Manifold::GetProperties() const {
   return GetCsgLeafNode().GetImpl()->GetProperties();
-}
-
-/**
- * Curvature is the inverse of the radius of curvature, and signed such that
- * positive is convex and negative is concave. There are two orthogonal
- * principal curvatures at any point on a manifold, with one maximum and the
- * other minimum. Gaussian curvature is their product, while mean
- * curvature is their sum. This approximates them for every vertex (returned as
- * vectors in the structure) and also returns their minimum and maximum values.
- */
-Curvature Manifold::GetCurvature() const {
-  return GetCsgLeafNode().GetImpl()->GetCurvature();
 }
 
 /**
@@ -460,13 +476,6 @@ uint32_t Manifold::ReserveIDs(uint32_t n) {
 
 void Manifold::SetID(int ith) {
   GetCsgLeafNodeMut().GetImplMut().meshRelation_.originalID = ith;
-}
-
-/**
- * Should always be true. Also checks saneness of the internal data structures.
- */
-bool Manifold::IsManifold() const {
-  return GetCsgLeafNode().GetImpl()->Is2Manifold();
 }
 
 /**
@@ -579,12 +588,81 @@ Manifold Manifold::Mirror(glm::vec3 normal) const {
  */
 Manifold Manifold::Warp(std::function<void(glm::vec3&)> warpFunc) const {
   auto pImpl = std::make_shared<Impl>(*GetCsgLeafNode().GetImpl());
-  thrust::for_each_n(thrust::host, pImpl->vertPos_.begin(), NumVert(),
-                     warpFunc);
-  pImpl->Update();
-  pImpl->faceNormal_.resize(0);  // force recalculation of triNormal
-  pImpl->CalculateNormals();
-  pImpl->SetPrecision();
+  pImpl->Warp(warpFunc);
+  return Manifold(std::make_shared<CsgLeafNode>(pImpl));
+}
+
+/**
+ * Create a new copy of this manifold with updated vertex properties by
+ * supplying a function that takes the existing position and properties as
+ * input. You may specify any number of output properties, allowing creation and
+ * removal of channels. Note: undefined behavior will result if you read past
+ * the number of input properties or write past the number of output properties.
+ *
+ * @param numProp The new number of properties per vertex.
+ * @param propFunc A function that modifies the properties of a given vertex.
+ */
+Manifold Manifold::SetProperties(
+    int numProp, std::function<void(float* newProp, glm::vec3 position,
+                                    const float* oldProp)>
+                     propFunc) const {
+  auto pImpl = std::make_shared<Impl>(*GetCsgLeafNode().GetImpl());
+  const int oldNumProp = NumProp();
+  const VecDH<float> oldProperties = pImpl->meshRelation_.properties;
+
+  auto& triProperties = pImpl->meshRelation_.triProperties;
+  if (numProp == 0) {
+    triProperties.resize(0);
+    pImpl->meshRelation_.properties.resize(0);
+  } else {
+    if (triProperties.size() == 0) {
+      const int numTri = NumTri();
+      triProperties.resize(numTri);
+      int idx = 0;
+      for (int i = 0; i < numTri; ++i) {
+        for (const int j : {0, 1, 2}) {
+          triProperties[i][j] = idx++;
+        }
+      }
+      pImpl->meshRelation_.properties = VecDH<float>(numProp * idx, 0);
+    } else {
+      pImpl->meshRelation_.properties =
+          VecDH<float>(numProp * NumPropVert(), 0);
+    }
+    thrust::for_each_n(
+        thrust::host, countAt(0), NumTri(),
+        UpdateProperties({pImpl->meshRelation_.properties.ptrH(), numProp,
+                          oldProperties.ptrH(), oldNumProp,
+                          pImpl->vertPos_.ptrH(), triProperties.ptrH(),
+                          pImpl->halfedge_.ptrH(), propFunc}));
+  }
+
+  pImpl->meshRelation_.numProp = numProp;
+  pImpl->CreateFaces();
+  pImpl->SimplifyTopology();
+  pImpl->Finish();
+  return Manifold(std::make_shared<CsgLeafNode>(pImpl));
+}
+
+/**
+ * Curvature is the inverse of the radius of curvature, and signed such that
+ * positive is convex and negative is concave. There are two orthogonal
+ * principal curvatures at any point on a manifold, with one maximum and the
+ * other minimum. Gaussian curvature is their product, while mean
+ * curvature is their sum. This approximates them for every vertex and assigns
+ * them as vertex properties on the given channels.
+ *
+ * @param gaussianIdx The property channel index in which to store the Gaussian
+ * curvature. An index < 0 will be ignored (stores nothing). The property set
+ * will be automatically expanded to include the channel index specified.
+ *
+ * @param meanIdx The property channel index in which to store the mean
+ * curvature. An index < 0 will be ignored (stores nothing). The property set
+ * will be automatically expanded to include the channel index specified.
+ */
+Manifold Manifold::CalculateCurvature(int gaussianIdx, int meanIdx) const {
+  auto pImpl = std::make_shared<Impl>(*GetCsgLeafNode().GetImpl());
+  pImpl->CalculateCurvature(gaussianIdx, meanIdx);
   return Manifold(std::make_shared<CsgLeafNode>(pImpl));
 }
 
@@ -726,4 +804,50 @@ Manifold Manifold::TrimByPlane(glm::vec3 normal, float originOffset) const {
 }
 
 ExecutionParams& ManifoldParams() { return params; }
+
+/**
+ * Compute the convex hull of a set of points. If the given points are fewer
+ * than 4, or they are all coplanar, an empty Manifold will be returned.
+ *
+ * @param pts A vector of 3-dimensional points over which to compute a convex
+ * hull.
+ */
+Manifold Manifold::Hull(const std::vector<glm::vec3>& pts) {
+  const int numVert = pts.size();
+  if (numVert < 4) return Manifold();
+
+  std::vector<quickhull::Vector3<double>> vertices(numVert);
+  for (int i = 0; i < numVert; i++) {
+    vertices[i] = {pts[i].x, pts[i].y, pts[i].z};
+  }
+
+  quickhull::QuickHull<double> qh;
+  // bools: correct triangle winding, and use original indices
+  auto hull = qh.getConvexHull(vertices, false, true);
+  const auto& triangles = hull.getIndexBuffer();
+  const int numTris = triangles.size() / 3;
+
+  Mesh mesh;
+  mesh.vertPos = pts;
+  mesh.triVerts.reserve(numTris);
+  for (int i = 0; i < numTris; i++) {
+    const int j = i * 3;
+    mesh.triVerts.push_back({triangles[j], triangles[j + 1], triangles[j + 2]});
+  }
+  return Manifold(mesh);
+}
+
+/**
+ * Compute the convex hull of this manifold.
+ */
+Manifold Manifold::Hull() const { return Hull(GetMesh().vertPos); }
+
+/**
+ * Compute the convex hull enveloping a set of manifolds.
+ *
+ * @param manifolds A vector of manifolds over which to compute a convex hull.
+ */
+Manifold Manifold::Hull(const std::vector<Manifold>& manifolds) {
+  return Compose(manifolds).Hull();
+}
 }  // namespace manifold

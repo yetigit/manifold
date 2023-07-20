@@ -109,9 +109,15 @@ build
 buildWASM
 docs/html
 node_modules/
+bindings/wasm/examples/built
+bindings/wasm/examples/dist
+bindings/wasm/examples/public/manifold*
 install/
 __pycache__
 .vscode/c_cpp_properties.json
 *.sublime-project
 *.sublime-workspace
 .cache
+
+# PyCharm
+.idea
